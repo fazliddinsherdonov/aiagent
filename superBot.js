@@ -25,38 +25,57 @@ function startSuperBot(token) {
 
   // ── /start ──────────────────────────────────────────────────────
   superBot.onText(/\/start/, async msg => {
-    const tgId  = String(msg.from.id);
+    const tgId    = String(msg.from.id);
     const isAdmin = await isSuperAdmin(tgId);
 
+    // ── Super Admin ──
     if (isAdmin) {
       return superBot.sendMessage(msg.chat.id,
         `👑 <b>Super Admin panel</b>\n\n` +
+        `🆔 Sizning ID: <code>${tgId}</code>\n\n` +
         `/workspacelar — Barcha workspacelar\n` +
         `/stat — Umumiy statistika\n` +
         `/yangi — Yangi workspace qo'shish\n` +
-        `/faollashtir &lt;id&gt; &lt;kunlar&gt; — To'lovni tasdiqlash\n` +
-        `/toxtattir &lt;id&gt; — Workspace to'xtatish\n` +
-        `/ochir &lt;id&gt; — Workspace o'chirish`,
+        `/faollashtir &lt;id&gt; &lt;kunlar&gt; — Faollashtirish\n` +
+        `/toxtattir &lt;id&gt; — To'xtatish\n` +
+        `/ochir &lt;id&gt; — O'chirish`,
         { parse_mode: 'HTML' });
     }
 
-    // Oddiy foydalanuvchi — workspace egasi bo'lishi mumkin
-    const existing = await queries.getWorkspaceByOwner(tgId);
-    if (existing) {
-      const status = existing.status === 'active' ? '✅ Faol' :
-                     existing.status === 'pending' ? '⏳ To\'lov kutilmoqda' : '❌ To\'xtatilgan';
+    // ── Workspace egasi ──
+    const ws = await queries.getWorkspaceByOwner(tgId);
+    if (ws) {
+      const status = ws.status === 'active' ? '✅ Faol' :
+                     ws.status === 'pending' ? '⏳ To\'lov kutilmoqda' : '❌ To\'xtatilgan';
+
+      // Users jadvalidan egani topamiz
+      const ownerUser = await queries.getUserByTelegramId(ws.id, tgId);
+      const hasPassword = ownerUser && ownerUser.password_hash;
+
+      const kb = ws.status === 'active' && ws.app_url ? {
+        reply_markup: { inline_keyboard: [[
+          { text: `🚀 ${ws.name} — Panelni ochish`, web_app: { url: `${ws.app_url}/ws/${ws.slug}` } }
+        ]]}
+      } : {};
+
       return superBot.sendMessage(msg.chat.id,
-        `🏢 <b>Sizning workspace:</b> ${existing.name}\n` +
+        `👋 Salom, <b>${msg.from.first_name}</b>!\n\n` +
+        `🏢 <b>${ws.name}</b>\n` +
         `📊 Holat: ${status}\n` +
-        (existing.expires_at ? `⏰ Muddat: ${new Date(existing.expires_at).toLocaleDateString('uz-UZ')}\n` : '') +
-        `\nQo'shimcha workspace uchun: /yangi_workspace`,
-        { parse_mode: 'HTML' });
+        (ws.expires_at ? `⏰ Muddat: ${new Date(ws.expires_at).toLocaleDateString('uz-UZ')}\n` : '') +
+        `\n🆔 Sizning ID: <code>${tgId}</code>\n` +
+        (!hasPassword ? `\n⚠️ Parol o'rnatilmagan!\nPanel kirish uchun: /setpassword PAROL` :
+          `\n✅ Parol o'rnatilgan — panelga kirishingiz mumkin`) +
+        `\n\n📋 Buyruqlar:\n/myid — ID ko'rish\n/myprofile — Profil\n/setpassword — Parol o'rnatish`,
+        { parse_mode: 'HTML', ...kb });
     }
 
+    // ── Yangi foydalanuvchi ──
     superBot.sendMessage(msg.chat.id,
       `👋 Salom, <b>${msg.from.first_name}</b>!\n\n` +
-      `Bu tizim orqali o'z xodimlar boshqaruv botingizni yaratishingiz mumkin.\n\n` +
-      `Boshlash uchun: /yangi_workspace`,
+      `🆔 Sizning Telegram ID: <code>${tgId}</code>\n\n` +
+      `Bu bot orqali xodimlar boshqaruv tizimini yaratishingiz mumkin.\n\n` +
+      `✅ Boshlash uchun: /yangi_workspace`,
       { parse_mode: 'HTML' });
   });
 
