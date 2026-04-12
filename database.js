@@ -11,12 +11,65 @@ let db, pgPool;
 // ── PostgreSQL ────────────────────────────────────────────────────
 async function initPostgres() {
   const { Pool } = require('pg');
+
+  // ── Validate DATABASE_URL ──────────────────────────────────────
+  const rawUrl = process.env.DATABASE_URL;
+
+  if (!rawUrl) {
+    throw new Error(
+      '[DB] DATABASE_URL is not set. ' +
+      'Make sure the variable is defined in Railway and the service has been redeployed.'
+    );
+  }
+
+  // Redact password for safe logging: keep scheme + host + path, hide credentials
+  let redactedUrl = rawUrl;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.password) parsed.password = '***';
+    redactedUrl = parsed.toString();
+  } catch (_) {
+    // URL parsing failed — the string itself is malformed
+    redactedUrl = rawUrl.replace(/:([^:@]{4})[^@]*@/, ':$1***@');
+  }
+  console.log(`[DB] DATABASE_URL received (redacted): ${redactedUrl}`);
+  console.log(`[DB] DATABASE_URL length: ${rawUrl.length} chars`);
+
+  // Sanity-check: a valid postgresql:// URL must contain a host after "@"
+  const hasValidHost = /^postgres(?:ql)?:\/\/[^@]+@[^@/]+/.test(rawUrl);
+  if (!hasValidHost) {
+    throw new Error(
+      `[DB] DATABASE_URL appears to be truncated or malformed.\n` +
+      `  Received (redacted): ${redactedUrl}\n` +
+      `  Expected format:     postgresql://user:password@host:port/database\n` +
+      `  Check that the Railway reference variable resolves to the full connection string.`
+    );
+  }
+
   pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: rawUrl,
     ssl: { rejectUnauthorized: false }
   });
 
-  await pgPool.query(`
+  // Verify the connection is actually reachable before running DDL
+  try {
+    await pgPool.query('SELECT 1');
+    console.log('[DB] Test query succeeded — connection is healthy');
+  } catch (connErr) {
+    // Tear down the pool so the process doesn't hang
+    await pgPool.end().catch(() => {});
+    throw new Error(
+      `[DB] Failed to connect to PostgreSQL.\n` +
+      `  URL (redacted): ${redactedUrl}\n` +
+      `  Error code:     ${connErr.code || 'N/A'}\n` +
+      `  Error message:  ${connErr.message}\n` +
+      `  Hint: PG error 3D000 means the database name in the URL does not exist on the server.\n` +
+      `        Check that DATABASE_URL is the full, untruncated connection string.`
+    );
+  }
+
+  try {
+    await pgPool.query(`
     -- Workspacelar (har bir oshxona)
     CREATE TABLE IF NOT EXISTS workspaces (
       id SERIAL PRIMARY KEY,
@@ -133,6 +186,15 @@ async function initPostgres() {
       'INSERT INTO super_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [k,v]
     );
   }
+  } catch (schemaErr) {
+    await pgPool.end().catch(() => {});
+    throw new Error(
+      `[DB] Schema initialisation failed.\n` +
+      `  Error code:    ${schemaErr.code || 'N/A'}\n` +
+      `  Error message: ${schemaErr.message}`
+    );
+  }
+
   console.log('✅ PostgreSQL (multi-tenant) tayyor');
 }
 
