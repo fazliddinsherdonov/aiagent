@@ -356,7 +356,7 @@ function startSuperBot(token) {
     const tgId = String(msg.from.id);
     const newPass = match[1].trim();
     if (newPass.length < 4) {
-      return superBot.sendMessage(msg.chat.id, '❌ Parol kamida 4 ta belgi bo'lsin.');
+      return superBot.sendMessage(msg.chat.id, "❌ Parol kamida 4 ta belgi bo'lsin.");
     }
     try {
       const bcrypt = require('bcryptjs');
