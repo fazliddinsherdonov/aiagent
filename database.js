@@ -217,7 +217,7 @@ function initSqlite() {
 const q = {
   async get(sql, params=[]) {
     if (USE_PG) {
-      const pgSql = sql.replace(/\?/g, (_,i) => `$${i+1}`);
+      const pgSql = (() => { let c=0; return sql.replace(/\?/g, () => `$${++c}`); })();
       const res = await pgPool.query(pgSql, params);
       return res.rows[0] || null;
     }
@@ -225,7 +225,7 @@ const q = {
   },
   async all(sql, params=[]) {
     if (USE_PG) {
-      const pgSql = sql.replace(/\?/g, (_,i) => `$${i+1}`);
+      const pgSql = (() => { let c=0; return sql.replace(/\?/g, () => `$${++c}`); })();
       const res = await pgPool.query(pgSql, params);
       return res.rows;
     }
@@ -233,12 +233,21 @@ const q = {
   },
   async run(sql, params=[]) {
     if (USE_PG) {
-      const pgSql = sql.replace(/\?/g, (_,i) => `$${i+1}`);
-      try {
-        const res = await pgPool.query(pgSql + ' RETURNING id', params);
-        return { lastInsertRowid: res.rows[0]?.id };
-      } catch {
-        const res = await pgPool.query(pgSql, params);
+      const pgSql = (() => { let c=0; return sql.replace(/\?/g, () => `$${++c}`); })();
+      const isInsert = /^\s*INSERT/i.test(sql);
+      if (isInsert) {
+        // INSERT da RETURNING id ishlatish
+        const returnSql = /RETURNING/i.test(pgSql) ? pgSql : pgSql + ' RETURNING id';
+        try {
+          const res = await pgPool.query(returnSql, params);
+          return { lastInsertRowid: res.rows[0]?.id };
+        } catch {
+          const res = await pgPool.query(pgSql, params);
+          return { lastInsertRowid: null };
+        }
+      } else {
+        // UPDATE, DELETE — RETURNING qo'shmaymiz
+        await pgPool.query(pgSql, params);
         return { lastInsertRowid: null };
       }
     }
