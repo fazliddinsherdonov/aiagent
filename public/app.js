@@ -4,10 +4,11 @@
 
 const API = '/api';
 let state = {
-  token: localStorage.getItem('token'),
-  user: JSON.parse(localStorage.getItem('user') || 'null'),
+  token:       localStorage.getItem('token'),
+  user:        JSON.parse(localStorage.getItem('user') || 'null'),
+  wsSlug:      localStorage.getItem('wsSlug') || null,
   currentPanel: null,
-  currentTab: null,
+  currentTab:   null,
 };
 
 /* ── Utils ──────────────────────────────────────── */
@@ -30,14 +31,21 @@ function showToast(msg, type = 'info') {
 }
 
 async function http(method, url, body = null, isForm = false) {
+  const wsSlug = state.wsSlug || getWsSlugFromUrl();
   const opts = {
     method,
-    headers: { 'Authorization': state.token ? `Bearer ${state.token}` : '' }
+    headers: {
+      'Authorization': state.token ? `Bearer ${state.token}` : '',
+      ...(wsSlug ? { 'X-Workspace-Slug': wsSlug } : {})
+    }
   };
   if (body && !isForm) {
     opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
+    // ws_slug ni body ga ham qo'shamiz
+    const bodyWithSlug = wsSlug ? { ...body, ws_slug: wsSlug } : body;
+    opts.body = JSON.stringify(bodyWithSlug);
   } else if (body && isForm) {
+    if (wsSlug) body.append('ws_slug', wsSlug);
     opts.body = body;
   }
   const res = await fetch(API + url, opts);
@@ -49,6 +57,12 @@ async function http(method, url, body = null, isForm = false) {
     throw err;
   }
   return data;
+}
+
+// URL dan workspace slug olish: /ws/kamolon → 'kamolon'
+function getWsSlugFromUrl() {
+  const match = window.location.pathname.match(/^\/ws\/([^/]+)/);
+  return match ? match[1] : null;
 }
 
 function togglePass(inputId, btn) {
@@ -103,31 +117,32 @@ function previewImage(src) {
 async function doLogin() {
   const activeRole = document.querySelector('.role-tab.active')?.dataset.role || 'worker';
   let identifier = '';
-  let id_type = 'telegram';
-  let password = '';
+  let id_type    = 'telegram';
+  let password   = '';
 
   if (activeRole === 'owner') {
-    // Ega: telefon + parol
-    const phone = document.getElementById('login-phone')?.value.trim() || '';
-    password = document.getElementById('login-pass')?.value || '';
-    if (!phone) return showToast('Telefon raqamini kiriting', 'error');
-    if (!password) return showToast('Parolni kiriting', 'error');
-    identifier = '+998' + phone;
-    id_type = 'phone';
+    // Ega: Telegram ID + parol
+    identifier = document.getElementById('login-owner-tgid')?.value.trim() || '';
+    password   = document.getElementById('login-pass')?.value || '';
+    id_type    = 'telegram';
+    if (!identifier) return showToast('Telegram ID ni kiriting', 'error');
+    if (!password)   return showToast('Parolni kiriting', 'error');
   } else {
     // Xodim / Admin / Superadmin: faqat Telegram ID
     identifier = document.getElementById('login-tgid')?.value.trim() || '';
-    id_type = 'telegram';
+    id_type    = 'telegram';
     if (!identifier) return showToast('Telegram ID ni kiriting', 'error');
   }
 
   showLoader();
   try {
     const data = await http('POST', '/auth/login', { identifier, id_type, password });
-    state.token = data.token;
-    state.user = data.user;
-    localStorage.setItem('token', state.token);
-    localStorage.setItem('user', JSON.stringify(state.user));
+    state.token   = data.token;
+    state.user    = data.user;
+    state.wsSlug  = data.user.workspace_slug || getWsSlugFromUrl();
+    localStorage.setItem('token',  state.token);
+    localStorage.setItem('user',   JSON.stringify(state.user));
+    localStorage.setItem('wsSlug', state.wsSlug || '');
     showToast(`Xush kelibsiz, ${data.user.first_name}!`, 'success');
     loadDashboard();
   } catch (err) {
@@ -149,23 +164,30 @@ async function tryTelegramAuth() {
   tg.ready();
   tg.expand();
   try {
-    const data = await http('POST', '/auth/telegram', { initData: tg.initData });
-    state.token = data.token;
-    state.user = data.user;
-    localStorage.setItem('token', state.token);
-    localStorage.setItem('user', JSON.stringify(state.user));
+    const wsSlug = getWsSlugFromUrl();
+    const data = await http('POST', '/auth/telegram', {
+      initData: tg.initData,
+      ws_slug: wsSlug
+    });
+    state.token  = data.token;
+    state.user   = data.user;
+    state.wsSlug = data.user.workspace_slug || wsSlug;
+    localStorage.setItem('token',  state.token);
+    localStorage.setItem('user',   JSON.stringify(state.user));
+    localStorage.setItem('wsSlug', state.wsSlug || '');
     return true;
-  } catch (err) {
-    // 404 - registered emas, login sahifasini ko'rsat
+  } catch {
     return false;
   }
 }
 
 function doLogout() {
-  state.token = null;
-  state.user = null;
+  state.token  = null;
+  state.user   = null;
+  state.wsSlug = null;
   localStorage.removeItem('token');
   localStorage.removeItem('user');
+  localStorage.removeItem('wsSlug');
   showPage('login-page');
   showToast("Tizimdan chiqildi");
 }

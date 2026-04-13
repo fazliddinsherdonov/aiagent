@@ -202,3 +202,42 @@ router.post('/trigger-reminder', requireOwner, async (req, res) => {
     res.json({ message: 'Eslatmalar yuborildi' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// ── Work Locations (GPS) ──────────────────────────────────────────
+router.get('/locations', requireOwner, async (req, res) => {
+  const ws = await queries.getWorkspaceById(req.user.workspace_id);
+  if (!ws) return res.status(400).json({ error: 'Workspace topilmadi' });
+  res.json(await queries.getWorkLocations(req.user.workspace_id));
+});
+
+router.post('/locations', requireOnlyOwner, async (req, res) => {
+  const { name, lat, lng, radius_meters } = req.body;
+  if (!lat || !lng) return res.status(400).json({ error: 'Koordinatlar kerak' });
+  const result = await queries.addWorkLocation(
+    req.user.workspace_id, name||'Asosiy joy', lat, lng, radius_meters||200
+  );
+  res.json({ message: 'Joylashuv qo\'shildi', id: result.lastInsertRowid });
+});
+
+router.delete('/locations/:id', requireOnlyOwner, async (req, res) => {
+  await queries.deleteWorkLocation(req.params.id);
+  res.json({ message: 'O\'chirildi' });
+});
+
+// ── Attendance (Kirish/Chiqish) ───────────────────────────────────
+router.get('/attendance', requireOwner, async (req, res) => {
+  res.json(await queries.getWorkspaceAttendanceToday(req.user.workspace_id));
+});
+
+// ── Leave requests (Ta'til) ───────────────────────────────────────
+router.get('/leaves', requireOwner, async (req, res) => {
+  res.json(await queries.getPendingLeaves(req.user.workspace_id));
+});
+
+router.post('/leaves/:id/review', requireOwner, async (req, res) => {
+  const { status } = req.body;
+  if (!['approved','rejected'].includes(status))
+    return res.status(400).json({ error: 'Status: approved yoki rejected' });
+  await queries.reviewLeave(req.params.id, status, req.user.id);
+  res.json({ message: status === 'approved' ? 'Tasdiqlandi' : 'Rad etildi' });
+});

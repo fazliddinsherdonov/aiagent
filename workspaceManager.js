@@ -102,7 +102,8 @@ function setupWorkspaceBotHandlers(bot, ws) {
   function aiOn()    { return ws.ai_enabled !== '0'; }
 
   // Conversations xotirasi
-  const conversations = new Map();
+  const conversations  = new Map();
+  const pendingCheckin = new Map(); // tgId → { wsId, userId, type: 'in'|'out' }
   function getHistory(cid) {
     if (!conversations.has(cid)) conversations.set(cid, []);
     return conversations.get(cid);
@@ -142,11 +143,32 @@ function setupWorkspaceBotHandlers(bot, ws) {
   bot.onText(/\/myid/, msg => bot.sendMessage(msg.chat.id, `🆔 <code>${msg.from.id}</code>`, { parse_mode:'HTML' }));
 
   bot.onText(/\/help/, async msg => {
-    const user = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    const user    = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
     const isAdmin = user && ['owner','superadmin','admin'].includes(user.role);
-    let text = `📖 <b>Buyruqlar — ${ws.name}</b>\n\n/start /myid /help`;
-    if (aiOn()) text += '\n/ai /clear';
-    if (isAdmin) text += '\n\n<b>Admin:</b>\n/stat /kim /xodimlar /bloklist\n/hisobot /eslatma\n/blok &lt;id&gt; /ochish &lt;id&gt;';
+    const isWorker = user && user.role === 'worker';
+
+    let text = `📖 <b>Buyruqlar — ${ws.name}</b>\n\n`;
+    text += `/start — Boshlash\n/myid — ID ko'rish\n/help — Yordam\n`;
+    if (aiOn()) text += `/ai — AI yordamchi\n/clear — Suhbat tozalash\n`;
+
+    if (isWorker || isAdmin) {
+      text += `\n<b>⏰ Vaqt hisobi:</b>\n`;
+      text += `/kirish — Ish boshlanishi\n`;
+      text += `/chiqish — Ish tugashi\n`;
+      text += `/vaqt — Bugungi ish vaqtim\n`;
+      text += `/mening_vaqtim — Oylik hisobot\n`;
+      text += `\n<b>📅 Ta'til/Kasallik:</b>\n`;
+      text += `/tatil YYYY-MM-DD YYYY-MM-DD — Ta'til so'rovi\n`;
+      text += `/kasal — Bugun kasal\n`;
+    }
+
+    if (isAdmin) {
+      text += `\n<b>🛡 Admin:</b>\n`;
+      text += `/stat /kim /xodimlar /bloklist\n`;
+      text += `/hisobot /eslatma\n`;
+      text += `/blok &lt;id&gt; /ochish &lt;id&gt;\n`;
+    }
+
     bot.sendMessage(msg.chat.id, text, { parse_mode:'HTML' });
   });
 
@@ -242,6 +264,195 @@ function setupWorkspaceBotHandlers(bot, ws) {
 
   bot.onText(/\/clear/, msg => { conversations.delete(String(msg.chat.id)); bot.sendMessage(msg.chat.id, '🗑 Tozalandi!'); });
 
+  // ── /kirish — ish boshlanishi ──────────────────────────────────
+  bot.onText(/\/kirish/, async msg => {
+    const chatId = String(msg.chat.id);
+    const user   = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user || user.is_blocked) return;
+    if (user.role !== 'worker') return bot.sendMessage(chatId, '❌ Bu buyruq faqat xodimlar uchun.');
+
+    const today = await queries.getTodayAttendance(ws.id, user.id);
+    if (today?.check_in) {
+      const t = new Date(today.check_in).toLocaleTimeString('uz-UZ', { hour:'2-digit', minute:'2-digit' });
+      return bot.sendMessage(chatId, `⚠️ Siz bugun <b>${t}</b> da kirgansiz.`, { parse_mode:'HTML' });
+    }
+
+    // GPS lokatsiya so'rash
+    bot.sendMessage(chatId,
+      `📍 <b>Kirish vaqti belgilanmoqda</b>\n\nJoylashuvingizni yuboring (ixtiyoriy) yoki /skip yozing:`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          keyboard: [[{ text: '📍 Joylashuvni yuborish', request_location: true }],
+                     [{ text: '⏩ O\'tkazib yuborish' }]],
+          resize_keyboard: true, one_time_keyboard: true
+        }
+      });
+
+    // Pending state
+    pendingCheckin.set(String(msg.from.id), { wsId: ws.id, userId: user.id, type: 'in' });
+  });
+
+  // ── /chiqish — ish tugashi ─────────────────────────────────────
+  bot.onText(/\/chiqish/, async msg => {
+    const chatId = String(msg.chat.id);
+    const user   = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user || user.is_blocked) return;
+    if (user.role !== 'worker') return bot.sendMessage(chatId, '❌ Bu buyruq faqat xodimlar uchun.');
+
+    const today = await queries.getTodayAttendance(ws.id, user.id);
+    if (!today?.check_in) {
+      return bot.sendMessage(chatId, `⚠️ Avval /kirish buyrug'ini bering.`);
+    }
+    if (today?.check_out) {
+      const t = new Date(today.check_out).toLocaleTimeString('uz-UZ', { hour:'2-digit', minute:'2-digit' });
+      return bot.sendMessage(chatId, `⚠️ Siz bugun <b>${t}</b> da chiqqansiz.`, { parse_mode:'HTML' });
+    }
+
+    bot.sendMessage(chatId,
+      `📍 <b>Chiqish vaqti belgilanmoqda</b>\n\nJoylashuvingizni yuboring (ixtiyoriy):`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          keyboard: [[{ text: '📍 Joylashuvni yuborish', request_location: true }],
+                     [{ text: '⏩ O\'tkazib yuborish' }]],
+          resize_keyboard: true, one_time_keyboard: true
+        }
+      });
+
+    pendingCheckin.set(String(msg.from.id), { wsId: ws.id, userId: user.id, type: 'out' });
+  });
+
+  // ── /vaqt — bugungi ish vaqtim ────────────────────────────────
+  bot.onText(/\/vaqt/, async msg => {
+    const user = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user) return;
+    const today = await queries.getTodayAttendance(ws.id, user.id);
+    if (!today?.check_in) return bot.sendMessage(msg.chat.id, '📋 Bugun hali kirmagansiz.');
+    const inTime  = new Date(today.check_in).toLocaleTimeString('uz-UZ', { hour:'2-digit', minute:'2-digit' });
+    const outTime = today.check_out
+      ? new Date(today.check_out).toLocaleTimeString('uz-UZ', { hour:'2-digit', minute:'2-digit' })
+      : 'Hali chiqmagan';
+    const mins   = today.work_minutes || 0;
+    const hours  = Math.floor(mins / 60);
+    const remain = mins % 60;
+    bot.sendMessage(msg.chat.id,
+      `⏰ <b>Bugungi ish vaqti</b>\n\n` +
+      `🟢 Kirish: <b>${inTime}</b>\n` +
+      `🔴 Chiqish: <b>${outTime}</b>\n` +
+      (mins > 0 ? `⏱ Ishlagan: <b>${hours}s ${remain}d</b>` : ''),
+      { parse_mode:'HTML' });
+  });
+
+  // ── /tatil [sana1] [sana2] — ta'til so'rovi ──────────────────
+  bot.onText(/\/tatil(.*)/, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    const user   = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user || user.is_blocked) return;
+    if (user.role !== 'worker') return;
+
+    const args = (match[1]||'').trim().split(/\s+/);
+    // Format: /tatil 2024-01-15 2024-01-17 [sabab]
+    const dateReg = /^\d{4}-\d{2}-\d{2}$/;
+    if (args.length < 2 || !dateReg.test(args[0]) || !dateReg.test(args[1])) {
+      return bot.sendMessage(chatId,
+        `📅 <b>Ta'til so'rovi</b>\n\n` +
+        `Foydalanish: <code>/tatil YYYY-MM-DD YYYY-MM-DD [sabab]</code>\n\n` +
+        `Misol:\n<code>/tatil 2024-01-15 2024-01-17 Oilaviy</code>`,
+        { parse_mode:'HTML' });
+    }
+
+    const startDate = args[0];
+    const endDate   = args[1];
+    const reason    = args.slice(2).join(' ') || null;
+
+    const start = new Date(startDate);
+    const end   = new Date(endDate);
+    if (end < start) return bot.sendMessage(chatId, '❌ Tugash sanasi boshlanish sanasidan oldin.');
+
+    const days = Math.ceil((end - start) / (24*3600*1000)) + 1;
+    const result = await queries.createLeaveRequest(ws.id, user.id, 'leave', startDate, endDate, reason);
+    const reqId  = result.lastInsertRowid;
+
+    bot.sendMessage(chatId,
+      `✅ <b>Ta'til so'rovi yuborildi</b>\n\n` +
+      `📅 ${startDate} — ${endDate} (${days} kun)\n` +
+      (reason ? `📝 Sabab: ${reason}\n` : '') +
+      `⏳ Admin ko'rib chiqadi.`,
+      { parse_mode:'HTML' });
+
+    // Adminga xabar
+    const admins = await queries.getAllAdmins(ws.id);
+    for (const a of admins) {
+      if (!a.telegram_id) continue;
+      bot.sendMessage(a.telegram_id,
+        `📅 <b>${user.first_name} ${user.last_name}</b> ta'til so'radi\n` +
+        `📆 ${startDate} — ${endDate} (${days} kun)\n` +
+        (reason ? `📝 ${reason}\n` : '') +
+        `\n<b>Qaror bering:</b>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '✅ Tasdiqlash', callback_data: `leave_ok_${reqId}_${user.telegram_id}` },
+              { text: '❌ Rad etish',  callback_data: `leave_no_${reqId}_${user.telegram_id}` }
+            ]]
+          }
+        }).catch(()=>{});
+    }
+  });
+
+  // ── /kasal — kasallik ─────────────────────────────────────────
+  bot.onText(/\/kasal(.*)/, async (msg, match) => {
+    const user = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user || user.is_blocked || user.role !== 'worker') return;
+    const today = new Date().toISOString().slice(0,10);
+    const reason = (match[1]||'').trim() || 'Kasallik';
+    const result = await queries.createLeaveRequest(ws.id, user.id, 'sick', today, today, reason);
+    const reqId  = result.lastInsertRowid;
+
+    bot.sendMessage(msg.chat.id,
+      `🤒 <b>Kasallik xabari yuborildi</b>\nAdmin xabardor qilindi.`,
+      { parse_mode:'HTML' });
+
+    const admins = await queries.getAllAdmins(ws.id);
+    for (const a of admins) {
+      if (!a.telegram_id) continue;
+      bot.sendMessage(a.telegram_id,
+        `🤒 <b>${user.first_name} ${user.last_name}</b> bugun kasal\n📝 ${reason}`,
+        {
+          parse_mode:'HTML',
+          reply_markup: { inline_keyboard: [[
+            { text:'✅ Qabul', callback_data:`leave_ok_${reqId}_${user.telegram_id}` },
+            { text:'❌ Rad',   callback_data:`leave_no_${reqId}_${user.telegram_id}` }
+          ]]}
+        }).catch(()=>{});
+    }
+  });
+
+  // ── /mening_vaqtim — oylik ish vaqtim ────────────────────────
+  bot.onText(/\/mening_vaqtim/, async msg => {
+    const user = await queries.getUserByTelegramId(ws.id, String(msg.from.id));
+    if (!user) return;
+    const records = await queries.getMonthlyAttendance(ws.id, user.id);
+    if (!records.length) return bot.sendMessage(msg.chat.id, '📋 Bu oy ma\'lumot yo\'q.');
+    const totalMins  = records.reduce((s,r) => s + (+r.work_minutes||0), 0);
+    const totalHours = Math.floor(totalMins/60);
+    const days       = records.filter(r => r.check_in).length;
+    let text = `📊 <b>Oylik hisobotingiz</b>\n\n`;
+    text += `📅 Ish kunlari: <b>${days}</b>\n`;
+    text += `⏱ Jami soat: <b>${totalHours}s ${totalMins%60}d</b>\n\n`;
+    records.slice(0,10).forEach(r => {
+      const d  = r.date;
+      const ci = r.check_in  ? new Date(r.check_in).toLocaleTimeString('uz-UZ',{hour:'2-digit',minute:'2-digit'}) : '—';
+      const co = r.check_out ? new Date(r.check_out).toLocaleTimeString('uz-UZ',{hour:'2-digit',minute:'2-digit'}) : '—';
+      const h  = Math.floor((+r.work_minutes||0)/60);
+      const m  = (+r.work_minutes||0)%60;
+      text += `${d}: ${ci}→${co} (${h}s${m}d)\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode:'HTML' });
+  });
+
   // Inline callback (bloklash tugmasi)
   bot.on('callback_query', async cq => {
     const data  = cq.data || '';
@@ -259,19 +470,46 @@ function setupWorkspaceBotHandlers(bot, ws) {
       bot.editMessageText((cq.message?.text||'') + `\n\n✅ ${admin.first_name} blokladi`,
         { chat_id:cq.message.chat.id, message_id:cq.message.message_id, parse_mode:'HTML' }).catch(()=>{});
       bot.answerCallbackQuery(cq.id, { text:`✅ Bloklandi` });
+
     } else if (data.startsWith('skip_')) {
       const uid = parseInt(data.split('_')[1]);
       await queries.updateAbsenceStatus(ws.id, uid, 'skipped');
       bot.editMessageText((cq.message?.text||'') + `\n\n✅ ${admin.first_name} o'tkazib yubordi`,
         { chat_id:cq.message.chat.id, message_id:cq.message.message_id, parse_mode:'HTML' }).catch(()=>{});
       bot.answerCallbackQuery(cq.id, { text:'✅ O\'tkazildi' });
+
+    } else if (data.startsWith('leave_ok_') || data.startsWith('leave_no_')) {
+      // leave_ok_<reqId>_<workerTgId>
+      const parts      = data.split('_');
+      const approved   = parts[1] === 'ok';
+      const reqId      = parseInt(parts[2]);
+      const workerTgId = parts[3];
+      const status     = approved ? 'approved' : 'rejected';
+
+      await queries.reviewLeave(reqId, status, admin.id);
+
+      const statusText = approved ? '✅ Tasdiqlandi' : '❌ Rad etildi';
+      bot.editMessageText(
+        (cq.message?.text||'') + `\n\n${statusText} — ${admin.first_name}`,
+        { chat_id:cq.message.chat.id, message_id:cq.message.message_id, parse_mode:'HTML' }
+      ).catch(()=>{});
+
+      // Xodimga xabar
+      if (workerTgId) {
+        bot.sendMessage(workerTgId,
+          approved
+            ? `✅ <b>So'rovingiz tasdiqlandi!</b>\nAdmin: ${admin.first_name}`
+            : `❌ <b>So'rovingiz rad etildi.</b>\nAdmin: ${admin.first_name}`,
+          { parse_mode:'HTML' }).catch(()=>{});
+      }
+      bot.answerCallbackQuery(cq.id, { text: statusText });
     }
   });
 
   // Xabarlar
   bot.on('message', async msg => {
     if (msg.text && msg.text.startsWith('/')) return;
-    if (!msg.text && !msg.photo) return;
+    if (!msg.text && !msg.photo && !msg.location) return;
 
     const chatId = String(msg.chat.id);
     const tgId   = String(msg.from.id);
@@ -280,6 +518,72 @@ function setupWorkspaceBotHandlers(bot, ws) {
 
     const keys = getKeys();
     const ai   = aiOn();
+
+    // ── LOKATSIYA (kirish/chiqish GPS) ────────────────────────────
+    if (msg.location || (msg.text && msg.text === '⏩ O\'tkazib yuborish')) {
+      const pending = pendingCheckin.get(tgId);
+      if (!pending) return;
+      pendingCheckin.delete(tgId);
+
+      const lat = msg.location?.latitude  || null;
+      const lng = msg.location?.longitude || null;
+
+      // GPS tekshiruv (agar work_locations sozlangan bo'lsa)
+      let locationOk = true;
+      let distanceMsg = '';
+      if (lat && lng) {
+        const locations = await queries.getWorkLocations(ws.id);
+        if (locations.length > 0) {
+          // Eng yaqin joyga masofani hisoblash (Haversine)
+          const closest = locations.map(loc => {
+            const R    = 6371000; // metr
+            const dLat = (lat - loc.lat) * Math.PI/180;
+            const dLng = (lng - loc.lng) * Math.PI/180;
+            const a    = Math.sin(dLat/2)**2 +
+                         Math.cos(lat*Math.PI/180) * Math.cos(loc.lat*Math.PI/180) *
+                         Math.sin(dLng/2)**2;
+            const dist = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+            return { ...loc, dist };
+          }).sort((a,b) => a.dist - b.dist)[0];
+
+          if (closest.dist > closest.radius_meters) {
+            locationOk = false;
+            distanceMsg = `\n⚠️ Ish joyidan ${closest.dist}m uzoqdasiz (ruxsat: ${closest.radius_meters}m)`;
+          } else {
+            distanceMsg = `\n📍 ${closest.name}dan ${closest.dist}m`;
+          }
+        }
+      }
+
+      const time = new Date().toLocaleTimeString('uz-UZ', { hour:'2-digit', minute:'2-digit' });
+
+      if (pending.type === 'in') {
+        await queries.checkIn(pending.wsId, pending.userId, lat, lng);
+        bot.sendMessage(chatId,
+          `🟢 <b>Kirish qayd etildi: ${time}</b>${distanceMsg}` +
+          (!locationOk ? '\n\n⚠️ Ish joyidan tashqaridasiz — admin xabardor qilindi.' : ''),
+          { parse_mode:'HTML', reply_markup: { remove_keyboard: true } });
+
+        if (!locationOk) {
+          const admins = await queries.getAllAdmins(ws.id);
+          for (const a of admins) {
+            if (a.telegram_id) bot.sendMessage(a.telegram_id,
+              `⚠️ <b>${user.first_name} ${user.last_name}</b> ish joyidan tashqarida kirdi\n📍 ${distanceMsg.trim()}`,
+              { parse_mode:'HTML' }).catch(()=>{});
+          }
+        }
+      } else {
+        await queries.checkOut(pending.wsId, pending.userId, lat, lng);
+        const att  = await queries.getTodayAttendance(pending.wsId, pending.userId);
+        const mins = att?.work_minutes || 0;
+        const h    = Math.floor(mins/60);
+        const m    = mins%60;
+        bot.sendMessage(chatId,
+          `🔴 <b>Chiqish qayd etildi: ${time}</b>\n⏱ Ishlagan: <b>${h}s ${m}d</b>${distanceMsg}`,
+          { parse_mode:'HTML', reply_markup: { remove_keyboard: true } });
+      }
+      return;
+    }
 
     // RASM
     if (msg.photo) {

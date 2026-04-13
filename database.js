@@ -101,6 +101,56 @@ async function initPostgres() {
       processed_at TIMESTAMP
     );
 
+    -- Kirish/Chiqish vaqti
+    CREATE TABLE IF NOT EXISTS attendance (
+      id SERIAL PRIMARY KEY,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      check_in TIMESTAMP,
+      check_out TIMESTAMP,
+      check_in_lat DOUBLE PRECISION,
+      check_in_lng DOUBLE PRECISION,
+      check_out_lat DOUBLE PRECISION,
+      check_out_lng DOUBLE PRECISION,
+      work_minutes INTEGER DEFAULT 0,
+      date DATE NOT NULL DEFAULT CURRENT_DATE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(workspace_id, user_id, date)
+    );
+
+    -- Ta'til / Kasallik so'rovlari
+    CREATE TABLE IF NOT EXISTS leave_requests (
+      id SERIAL PRIMARY KEY,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL DEFAULT 'leave',
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      reason TEXT,
+      status TEXT DEFAULT 'pending',
+      reviewed_by INTEGER,
+      reviewed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Ish joyi (GPS markazi)
+    CREATE TABLE IF NOT EXISTS work_locations (
+      id SERIAL PRIMARY KEY,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      name TEXT NOT NULL DEFAULT 'Asosiy joy',
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      radius_meters INTEGER NOT NULL DEFAULT 200,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_att_ws   ON attendance(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_att_uid  ON attendance(user_id);
+    CREATE INDEX IF NOT EXISTS idx_att_date ON attendance(date);
+    CREATE INDEX IF NOT EXISTS idx_lr_ws    ON leave_requests(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_lr_uid   ON leave_requests(user_id);
+    CREATE INDEX IF NOT EXISTS idx_lr_stat  ON leave_requests(status);
+
     -- Super admin sozlamalari
     CREATE TABLE IF NOT EXISTS super_settings (
       key TEXT PRIMARY KEY,
@@ -193,7 +243,42 @@ function initSqlite() {
       status TEXT DEFAULT 'pending',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, processed_at DATETIME
     );
+    CREATE TABLE IF NOT EXISTS attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      check_in DATETIME, check_out DATETIME,
+      check_in_lat REAL, check_in_lng REAL,
+      check_out_lat REAL, check_out_lng REAL,
+      work_minutes INTEGER DEFAULT 0,
+      date TEXT NOT NULL DEFAULT (DATE('now','localtime')),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(workspace_id, user_id, date)
+    );
+    CREATE TABLE IF NOT EXISTS leave_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL DEFAULT 'leave',
+      start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+      reason TEXT, status TEXT DEFAULT 'pending',
+      reviewed_by INTEGER, reviewed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS work_locations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+      name TEXT NOT NULL DEFAULT 'Asosiy joy',
+      lat REAL NOT NULL, lng REAL NOT NULL,
+      radius_meters INTEGER NOT NULL DEFAULT 200,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS super_settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE INDEX IF NOT EXISTS idx_att_ws   ON attendance(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_att_uid  ON attendance(user_id);
+    CREATE INDEX IF NOT EXISTS idx_att_date ON attendance(date);
+    CREATE INDEX IF NOT EXISTS idx_lr_ws    ON leave_requests(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_lr_uid   ON leave_requests(user_id);
     CREATE INDEX IF NOT EXISTS idx_ws_slug   ON workspaces(slug);
     CREATE INDEX IF NOT EXISTS idx_ws_token  ON workspaces(bot_token);
     CREATE INDEX IF NOT EXISTS idx_u_ws      ON users(workspace_id);
@@ -389,6 +474,50 @@ const queries = {
 
   // ── Workspace settings (shorthand) ────────────────────────────
   getWsSetting: (ws, key) => ws[key] || null,
+
+  // ── Attendance (Kirish/Chiqish) ────────────────────────────────
+  getTodayAttendance: (wsId, userId) =>
+    q.get("SELECT * FROM attendance WHERE workspace_id=? AND user_id=? AND date=CURRENT_DATE", [wsId, userId]),
+  checkIn: (wsId, userId, lat, lng) =>
+    q.run(`INSERT INTO attendance (workspace_id,user_id,date,check_in,check_in_lat,check_in_lng)
+           VALUES (?,?,CURRENT_DATE,CURRENT_TIMESTAMP,?,?)
+           ON CONFLICT (workspace_id,user_id,date) DO UPDATE SET
+           check_in=CURRENT_TIMESTAMP,check_in_lat=EXCLUDED.check_in_lat,check_in_lng=EXCLUDED.check_in_lng`,
+      [wsId, userId, lat||null, lng||null]),
+  checkOut: (wsId, userId, lat, lng) =>
+    q.run(`UPDATE attendance SET check_out=CURRENT_TIMESTAMP,check_out_lat=?,check_out_lng=?,
+           work_minutes=ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-check_in))/60)
+           WHERE workspace_id=? AND user_id=? AND date=CURRENT_DATE AND check_in IS NOT NULL`,
+      [lat||null, lng||null, wsId, userId]),
+  getMonthlyAttendance: (wsId, userId) =>
+    q.all("SELECT * FROM attendance WHERE workspace_id=? AND user_id=? ORDER BY date DESC LIMIT 31", [wsId, userId]),
+  getWorkspaceAttendanceToday: (wsId) =>
+    q.all(`SELECT a.*,u.first_name,u.last_name FROM attendance a
+           JOIN users u ON a.user_id=u.id
+           WHERE a.workspace_id=? AND a.date=CURRENT_DATE ORDER BY a.check_in ASC`, [wsId]),
+
+  // ── Leave requests (Ta'til/Kasallik) ──────────────────────────
+  createLeaveRequest: (wsId, userId, type, startDate, endDate, reason) =>
+    q.run('INSERT INTO leave_requests (workspace_id,user_id,type,start_date,end_date,reason) VALUES (?,?,?,?,?,?)',
+      [wsId, userId, type, startDate, endDate, reason||null]),
+  getPendingLeaves: (wsId) =>
+    q.all(`SELECT lr.*,u.first_name,u.last_name FROM leave_requests lr
+           JOIN users u ON lr.user_id=u.id
+           WHERE lr.workspace_id=? AND lr.status='pending' ORDER BY lr.created_at DESC`, [wsId]),
+  reviewLeave: (id, status, reviewedBy) =>
+    q.run("UPDATE leave_requests SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+      [status, reviewedBy, id]),
+  getUserLeaves: (wsId, userId) =>
+    q.all("SELECT * FROM leave_requests WHERE workspace_id=? AND user_id=? ORDER BY created_at DESC LIMIT 20",
+      [wsId, userId]),
+
+  // ── Work locations (GPS) ───────────────────────────────────────
+  getWorkLocations: (wsId) =>
+    q.all("SELECT * FROM work_locations WHERE workspace_id=? ORDER BY id ASC", [wsId]),
+  addWorkLocation: (wsId, name, lat, lng, radius) =>
+    q.run("INSERT INTO work_locations (workspace_id,name,lat,lng,radius_meters) VALUES (?,?,?,?,?)",
+      [wsId, name, lat, lng, radius||200]),
+  deleteWorkLocation: (id) => q.run("DELETE FROM work_locations WHERE id=?", [id]),
 };
 
 // SQLite fixes
@@ -445,6 +574,23 @@ function fixSqliteQueries() {
   queries.setSuperSetting  = (key,val) => q.run('INSERT OR REPLACE INTO super_settings (key,value) VALUES (?,?)', [key,val]);
   queries.checkPhotoHash       = (wsId,hash) => Promise.resolve(hash ? db.prepare('SELECT id,created_at FROM work_logs WHERE workspace_id=? AND photo_hash=? LIMIT 1').get(wsId,hash) : null);
   queries.checkPhotoSortedHash = (wsId,hash) => Promise.resolve(hash ? db.prepare('SELECT id,created_at FROM work_logs WHERE workspace_id=? AND photo_hash_sorted=? LIMIT 1').get(wsId,hash) : null);
+
+  // SQLite: attendance date va checkOut
+  queries.getTodayAttendance = (wsId, userId) =>
+    q.get("SELECT * FROM attendance WHERE workspace_id=? AND user_id=? AND date=DATE('now','localtime')", [wsId, userId]);
+  queries.checkIn = (wsId, userId, lat, lng) =>
+    q.run(`INSERT OR REPLACE INTO attendance (workspace_id,user_id,date,check_in,check_in_lat,check_in_lng)
+           VALUES (?,DATE('now','localtime'),CURRENT_TIMESTAMP,?,?)`,
+      [wsId, userId, lat||null, lng||null]);
+  queries.checkOut = (wsId, userId, lat, lng) =>
+    q.run(`UPDATE attendance SET check_out=CURRENT_TIMESTAMP,check_out_lat=?,check_out_lng=?,
+           work_minutes=CAST((strftime('%s','now')-strftime('%s',check_in))/60 AS INTEGER)
+           WHERE workspace_id=? AND user_id=? AND date=DATE('now','localtime') AND check_in IS NOT NULL`,
+      [lat||null, lng||null, wsId, userId]);
+  queries.getWorkspaceAttendanceToday = (wsId) =>
+    q.all(`SELECT a.*,u.first_name,u.last_name FROM attendance a
+           JOIN users u ON a.user_id=u.id
+           WHERE a.workspace_id=? AND a.date=DATE('now','localtime') ORDER BY a.check_in ASC`, [wsId]);
 }
 
 async function initialize() {
