@@ -3,32 +3,50 @@ const bcrypt = require('bcryptjs');
 const { queries } = require('../database');
 const { generateToken, validateTelegramData, verifyToken } = require('../middleware/auth');
 
-// Workspace ni slug orqali aniqlash
-// Frontend X-Workspace-Slug header yoki body.ws_slug orqali yuboradi
-async function resolveWorkspace(req) {
-  const slug = req.headers['x-workspace-slug'] || req.query.ws || req.body.ws_slug;
-  if (!slug) return null;
-  const ws = await queries.getWorkspaceBySlug(slug);
-  if (!ws || ws.status !== 'active') return null;
-  return ws;
+// ── Workspace aniqlash ────────────────────────────────────────────
+// 1. ws_slug / X-Workspace-Slug header
+// 2. Telegram ID orqali — egasi bo'lgan workspace
+async function resolveWorkspace(req, tgId) {
+  // 1. Slug orqali
+  const slug = req.headers['x-workspace-slug'] || req.query.ws || req.body?.ws_slug;
+  if (slug) {
+    const ws = await queries.getWorkspaceBySlug(slug);
+    if (ws) return ws; // active, pending — barchasiga ruxsat
+  }
+
+  // 2. Telegram ID orqali — owner o'z workspace ini topadi
+  if (tgId) {
+    const ws = await queries.getWorkspaceByOwner(String(tgId));
+    if (ws) return ws;
+  }
+
+  return null;
 }
 
+// ── Login ─────────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { identifier, id_type, password } = req.body;
     if (!identifier) return res.status(400).json({ error: 'ID kerak' });
 
-    const ws = await resolveWorkspace(req);
-    if (!ws) return res.status(400).json({ error: 'Workspace topilmadi. Sahifani qaytadan oching.' });
+    // Telegram ID ni oldindan olamiz — workspace topish uchun
+    const tgId = (id_type !== 'phone' && !identifier.startsWith('+'))
+      ? identifier.replace(/^@/, '')
+      : null;
 
+    // Workspace ni topamiz (tgId orqali ham)
+    const ws = await resolveWorkspace(req, tgId);
+    if (!ws) {
+      return res.status(400).json({
+        error: 'Workspace topilmadi. Bot orqali ilovani oching yoki admin bilan bog\'laning.'
+      });
+    }
+
+    // Foydalanuvchini topamiz
     let user = null;
-
     if (id_type === 'phone' || identifier.startsWith('+')) {
-      // Telefon bilan qidirish — topilmasa Telegram ID orqali ham qidirish
       user = await queries.getUserByPhone(ws.id, identifier);
     } else {
-      // Telegram ID orqali (owner ham shu bilan kira oladi)
-      const tgId = identifier.replace(/^@/, '');
       user = await queries.getUserByTelegramId(ws.id, tgId);
     }
 
@@ -38,7 +56,9 @@ router.post('/login', async (req, res) => {
     // Faqat owner uchun parol kerak
     if (user.role === 'owner') {
       if (!password) return res.status(401).json({ error: 'Parol kerak' });
-      if (!user.password_hash) return res.status(401).json({ error: "Parol o'rnatilmagan. Bot orqali /setpassword ishlating." });
+      if (!user.password_hash) return res.status(401).json({
+        error: "Parol o'rnatilmagan. Botda /setpassword ishlating."
+      });
       const valid = await bcrypt.compare(password, user.password_hash);
       if (!valid) return res.status(401).json({ error: "Parol noto'g'ri" });
     }
@@ -52,12 +72,18 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Telegram WebApp auto-login
+// ── Telegram WebApp auto-login ────────────────────────────────────
 router.post('/telegram', async (req, res) => {
   try {
-    const { initData } = req.body;
+    const { initData, ws_slug } = req.body;
 
-    const ws = await resolveWorkspace(req);
+    // ws_slug dan workspace topamiz
+    const slug = req.headers['x-workspace-slug'] || ws_slug || req.query.ws;
+    let ws = null;
+    if (slug) {
+      ws = await queries.getWorkspaceBySlug(slug);
+    }
+
     if (!ws) return res.status(400).json({ error: 'Workspace topilmadi' });
 
     const tgUser = validateTelegramData(initData, ws.bot_token);
@@ -88,6 +114,7 @@ router.post('/telegram', async (req, res) => {
   }
 });
 
+// ── Parol o'zgartirish ────────────────────────────────────────────
 router.post('/change-password', verifyToken, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;

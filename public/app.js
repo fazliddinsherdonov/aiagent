@@ -32,34 +32,35 @@ function showToast(msg, type = 'info') {
 
 async function http(method, url, body = null, isForm = false) {
   const wsSlug = state.wsSlug || getWsSlugFromUrl();
-  const opts = {
-    method,
-    headers: {
-      'Authorization': state.token ? `Bearer ${state.token}` : '',
-      ...(wsSlug ? { 'X-Workspace-Slug': wsSlug } : {})
-    }
+  const headers = {
+    'Authorization': state.token ? `Bearer ${state.token}` : ''
   };
+  if (wsSlug) headers['X-Workspace-Slug'] = wsSlug;
+
+  const opts = { method, headers };
+
   if (body && !isForm) {
-    opts.headers['Content-Type'] = 'application/json';
-    // ws_slug ni body ga ham qo'shamiz
-    const bodyWithSlug = wsSlug ? { ...body, ws_slug: wsSlug } : body;
-    opts.body = JSON.stringify(bodyWithSlug);
+    headers['Content-Type'] = 'application/json';
+    // ws_slug faqat mavjud bo'lsa qo'shamiz
+    const bodyToSend = wsSlug ? { ...body, ws_slug: wsSlug } : body;
+    opts.body = JSON.stringify(bodyToSend);
   } else if (body && isForm) {
     if (wsSlug) body.append('ws_slug', wsSlug);
     opts.body = body;
   }
-  const res = await fetch(API + url, opts);
+
+  const res  = await fetch(API + url, opts);
   const data = await res.json();
   if (!res.ok) {
     const err = new Error(data.error || 'Xato yuz berdi');
     err.duplicate = data.duplicate || false;
-    err.sent_at = data.sent_at || null;
+    err.sent_at   = data.sent_at   || null;
     throw err;
   }
   return data;
 }
 
-// URL dan workspace slug olish: /ws/kamolon → 'kamolon'
+// URL dan workspace slug: /ws/kamolon → 'kamolon'
 function getWsSlugFromUrl() {
   const match = window.location.pathname.match(/^\/ws\/([^/]+)/);
   return match ? match[1] : null;
